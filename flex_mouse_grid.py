@@ -41,6 +41,11 @@ mod.tag(
     desc="Tag indicates whether the flex mouse grid is showing",
 )
 
+mod.tag(
+    "flex_grid_boxes_showing",
+    desc="Tag indicates whether the flex grid boxes are showing",
+)
+
 setting_letters_background_color = mod.setting(
     "flex_mouse_grid_letters_background_color",
     type=str,
@@ -1249,6 +1254,8 @@ class GridActions:
         """Show or hide boxes"""
         mg.toggle_boxes(onoff=onoff == 1)
 
+        ctx.tags = []
+
     def flex_grid_boxes_threshold_view_toggle():
         """Show or hide boxes"""
         mg.toggle_boxes_threshold_view()
@@ -1257,9 +1264,13 @@ class GridActions:
         """Find all boxes, label with hints"""
         mg.find_boxes()
 
+        ctx.tags = ["user.flex_grid_boxes_showing"]
+
     def flex_grid_setup_boxes():
         """Do a binary search to find best box configuration"""
         mg.find_boxes(scan=True)
+
+        ctx.tags = ["user.flex_grid_boxes_showing"]
 
     def flex_grid_go_to_box(box_number: int, mouse_button: int):
         """Go to a box"""
