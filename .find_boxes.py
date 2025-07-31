@@ -1,5 +1,8 @@
 import sys
-import cv2
+try:
+    import cv2
+except ImportError:
+    print("Python module 'opencv-python-headless' not found. Can not search for boxes. Check flex-grid readme for installation instructions")
 import numpy as np
 import json
 import base64

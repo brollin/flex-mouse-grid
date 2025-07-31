@@ -159,14 +159,22 @@ class FlexMouseGrid:
         self.input_so_far = ""
         self.letters = string.ascii_lowercase
         self.morph = []
+        self.__reset_visibility_flags()
 
-        # visibility flags
+    def __reset_visibility_flags(self):
         self.grid_showing = False
         self.rulers_showing = False
         self.points_showing = False
         self.boxes_showing = False
         self.boxes_threshold_view_showing = False
         self.info_showing = False
+
+    def __create_canvas(self, screen):
+        if self.mcanvas is not None:
+            self.mcanvas.close()
+        self.mcanvas = canvas.Canvas.from_screen(screen)
+        self.mcanvas.register("draw", self.draw)
+        self.mcanvas.freeze()
 
     def setup(self, *, rect: Rect = None, screen_index: int = -1):
 
@@ -208,11 +216,7 @@ class FlexMouseGrid:
         self.selected_superblock = 0
         self.input_so_far = ""
 
-        # visibility flags
-        self.grid_showing = False
-        self.rulers_showing = False
-        self.points_showing = False
-        self.boxes_showing = False
+        self.__reset_visibility_flags()
 
         # points
         self.points_map_store = FlexStore("points", lambda: {})
@@ -252,11 +256,7 @@ class FlexMouseGrid:
         self.columns = int(self.rect.width // self.field_size)
         self.rows = int(self.rect.height // self.field_size)
 
-        if self.mcanvas is not None:
-            self.mcanvas.close()
-        self.mcanvas = canvas.Canvas.from_screen(screen)
-        self.mcanvas.register("draw", self.draw)
-        self.mcanvas.freeze()
+        self.__create_canvas(screen)
 
     def add_partial_input(self, letter: str):
         # this logic changes which superblock is selected
@@ -316,18 +316,21 @@ class FlexMouseGrid:
         self.redraw()
 
     def deactivate(self):
-        self.points_showing = False
-        self.boxes_showing = False
-        self.boxes_threshold_view_showing = False
-        self.grid_showing = False
-        self.info_showing = False
+        self.__reset_visibility_flags()
         self.redraw()
+
+        # Close the canvas when deactivating
+        if self.mcanvas is not None:
+            self.mcanvas.close()
+            self.mcanvas = None
 
         self.input_so_far = ""
 
     def redraw(self):
         if self.mcanvas:
             self.mcanvas.freeze()
+        else:
+            self.__create_canvas(self.screen)
 
     def draw(self, canvas):
         # for other-screen or individual-window grids
@@ -1141,6 +1144,9 @@ class FlexMouseGrid:
         print(process.stdout)
         print(process.stderr)
 
+        if process.returncode != 0:
+            print("Error running find_boxes.py:", process.stderr)
+            return
         process_output = json.loads(process.stdout)
         boxes = process_output["boxes"]
         window_rect = ui.active_window().rect
@@ -1227,7 +1233,12 @@ class FlexMouseGrid:
 
 
 mg = FlexMouseGrid()
-app.register("ready", mg.setup)
+# Initialize and then immediately deactivate to close the canvas
+def init_and_deactivate():
+    mg.setup()
+    mg.deactivate()
+
+app.register("ready", init_and_deactivate)
 
 
 @mod.action_class
