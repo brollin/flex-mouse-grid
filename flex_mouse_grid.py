@@ -146,9 +146,14 @@ def transform_image_space_to_window_space(image_width, image_height, window_rect
     )
 
 
+def get_fg_setting(name):
+    return settings.get("user.flex_mouse_grid_" + name)
+
+
 class FlexMouseGrid:
     def __init__(self):
         self.screen = None
+        # Rectangle that defines the area for the total canvas - e.g. the current screen or window
         self.rect: Rect = None
         self.history = []
         self.mcanvas = None
@@ -159,8 +164,9 @@ class FlexMouseGrid:
         self.input_so_far = ""
         self.letters = string.ascii_lowercase
         self.morph = []
+        self.__reset_visibility_flags()
 
-        # visibility flags
+    def __reset_visibility_flags(self):
         self.grid_showing = False
         self.rulers_showing = False
         self.points_showing = False
@@ -168,17 +174,20 @@ class FlexMouseGrid:
         self.boxes_threshold_view_showing = False
         self.info_showing = False
 
-    def setup(self, *, rect: Rect = None, screen_index: int = -1):
+    def __create_canvas(self, screen):
+        if self.mcanvas is not None:
+            self.mcanvas.close()
+        self.mcanvas = canvas.Canvas.from_screen(screen)
+        self.mcanvas.register("draw", self.draw)
+        self.mcanvas.freeze()
 
+    def setup(self, *, rect: Rect = None, screen_index: int = -1):
         # configured via settings
-        self.field_size = int(settings.get("user.flex_mouse_grid_field_size"))
-        self.label_transparency = int(
-            settings.get("user.flex_mouse_grid_label_transparency"), 16
-        )
-        self.bg_transparency = int(
-            settings.get("user.flex_mouse_grid_superblock_transparency"), 16
-        )
-        self.pattern = settings.get("user.flex_mouse_grid_startup_mode")
+        self.field_size = int(get_fg_setting("field_size"))
+        self.label_transparency = int(get_fg_setting("label_transparency"), 16)
+        self.label_transparency_hx = hx(self.label_transparency)
+        self.bg_transparency = int(get_fg_setting("superblock_transparency"), 16)
+        self.pattern = get_fg_setting("startup_mode")
 
         # get informaition on number and size of screens
         screens = ui.screens()
@@ -208,11 +217,7 @@ class FlexMouseGrid:
         self.selected_superblock = 0
         self.input_so_far = ""
 
-        # visibility flags
-        self.grid_showing = False
-        self.rulers_showing = False
-        self.points_showing = False
-        self.boxes_showing = False
+        self.__reset_visibility_flags()
 
         # points
         self.points_map_store = FlexStore("points", lambda: {})
@@ -236,14 +241,10 @@ class FlexMouseGrid:
         self.grid_config_store = FlexStore(
             "grid_config",
             lambda: {
-                "field_size": int(settings.get("user.flex_mouse_grid_field_size")),
-                "label_transparency": int(
-                    settings.get("user.flex_mouse_grid_label_transparency"), 16
-                ),
-                "bg_transparency": int(
-                    settings.get("user.flex_mouse_grid_superblock_transparency"), 16
-                ),
-                "pattern": settings.get("user.flex_mouse_grid_startup_mode"),
+                "field_size": int(get_fg_setting("field_size")),
+                "label_transparency": int(get_fg_setting("label_transparency"), 16),
+                "bg_transparency": int(get_fg_setting("superblock_transparency"), 16),
+                "pattern": get_fg_setting("startup_mode"),
             },
         )
         self.load_grid_config_from_store()
@@ -252,11 +253,7 @@ class FlexMouseGrid:
         self.columns = int(self.rect.width // self.field_size)
         self.rows = int(self.rect.height // self.field_size)
 
-        if self.mcanvas is not None:
-            self.mcanvas.close()
-        self.mcanvas = canvas.Canvas.from_screen(screen)
-        self.mcanvas.register("draw", self.draw)
-        self.mcanvas.freeze()
+        self.__create_canvas(screen)
 
     def add_partial_input(self, letter: str):
         # this logic changes which superblock is selected
@@ -316,18 +313,27 @@ class FlexMouseGrid:
         self.redraw()
 
     def deactivate(self):
-        self.points_showing = False
-        self.boxes_showing = False
-        self.boxes_threshold_view_showing = False
-        self.grid_showing = False
-        self.info_showing = False
+        self.__reset_visibility_flags()
         self.redraw()
+
+        # Close the canvas when deactivating
+        if self.mcanvas is not None:
+            self.mcanvas.close()
+            self.mcanvas = None
 
         self.input_so_far = ""
 
     def redraw(self):
         if self.mcanvas:
             self.mcanvas.freeze()
+        else:
+            self.__create_canvas(self.screen)
+
+    def _make_blockrect(self, col, row, size):
+        rect = Rect(col * size, row * size, size, size)
+        rect.right = min(rect.right, self.rect.width)
+        rect.bot = min(rect.bot, self.rect.height)
+        return rect
 
     def draw(self, canvas):
         # for other-screen or individual-window grids
@@ -340,325 +346,233 @@ class FlexMouseGrid:
                 self.rect.height + self.field_size * 4,
             )
         )
+        user_letter_words = list(registry.lists["user.letter"][0].keys())
+
+        def draw_():
+            if self.grid_showing:
+                draw_superblock()
+                draw_text()
+
+                if self.rulers_showing:
+                    draw_rulers()
+
+            if self.points_showing:
+                draw_point_labels()
+
+            if self.boxes_threshold_view_showing:
+                draw_threshold()
+
+            if self.boxes_showing:
+                draw_boxes()
+
+            if self.info_showing:
+                draw_info()
 
         def draw_superblock():
             superblock_size = len(self.letters) * self.field_size
-
-            colors = ["000055", "665566", "554444", "888855", "aa55aa", "55cccc"] * 100
-            num = 1
-
             self.superblocks = []
 
             skipped_superblock = self.selected_superblock + 1
 
-            if (
-                int(self.rect.height) // superblock_size == 0
-                and int(self.rect.width) // superblock_size == 0
-            ):
+            blocks_fitting_in_canvas_y = int(self.rect.height) // superblock_size
+            blocks_fitting_in_canvas_x = int(self.rect.width) // superblock_size
+            if blocks_fitting_in_canvas_y == 0 and blocks_fitting_in_canvas_x == 0:
                 skipped_superblock = 1
 
-            for row in range(0, int(self.rect.height) // superblock_size + 1):
-                for col in range(0, int(self.rect.width) // superblock_size + 1):
-                    canvas.paint.color = colors[(row + col) % len(colors)] + hx(
-                        self.bg_transparency
-                    )
-
-                    # canvas.paint.color = "ffffff"
-                    canvas.paint.style = Paint.Style.FILL
-                    blockrect = Rect(
-                        col * superblock_size,
-                        row * superblock_size,
-                        superblock_size,
-                        superblock_size,
-                    )
-                    blockrect.right = min(blockrect.right, self.rect.width)
-                    blockrect.bot = min(blockrect.bot, self.rect.height)
-                    canvas.draw_rect(blockrect)
-
-                    if skipped_superblock != num:
-                        # attempt to change backround color on the superblock chosen
-
-                        # canvas.paint.color = colors[(row + col) % len(colors)] + hx(self.bg_transparency)
-
-                        canvas.paint.color = settings.get(
-                            "user.flex_mouse_grid_superblock_background_color"
-                        ) + hx(self.bg_transparency)
-                        canvas.paint.style = Paint.Style.FILL
-                        blockrect = Rect(
-                            col * superblock_size,
-                            row * superblock_size,
-                            superblock_size,
-                            superblock_size,
-                        )
-                        blockrect.right = min(blockrect.right, self.rect.width)
-                        blockrect.bot = min(blockrect.bot, self.rect.height)
-                        canvas.draw_rect(blockrect)
-
-                        canvas.paint.color = settings.get(
-                            "user.flex_mouse_grid_superblock_stroke_color"
-                        ) + hx(self.bg_transparency)
-                        canvas.paint.style = Paint.Style.STROKE
-                        canvas.paint.stroke_width = 5
-                        blockrect = Rect(
-                            col * superblock_size,
-                            row * superblock_size,
-                            superblock_size,
-                            superblock_size,
-                        )
-                        blockrect.right = min(blockrect.right, self.rect.width)
-                        blockrect.bot = min(blockrect.bot, self.rect.height)
-                        canvas.draw_rect(blockrect)
-
-                        # drawing the big number in the background
-
-                        canvas.paint.style = Paint.Style.FILL
-                        canvas.paint.textsize = int(superblock_size)
-                        text_rect = canvas.paint.measure_text(str(num))[1]
-                        # text_rect.center = blockrect.center
-                        text_rect.x = blockrect.x
-                        text_rect.y = blockrect.y
-                        canvas.paint.color = settings.get(
-                            "user.flex_mouse_grid_large_number_color"
-                        ) + hx(self.bg_transparency)
-                        canvas.draw_text(
-                            str(num), text_rect.x, text_rect.y + text_rect.height
-                        )
-
+            block_num = 1
+            # Draw backgrounds for all except the current block
+            for row in range(0, blocks_fitting_in_canvas_y + 1):
+                for col in range(0, blocks_fitting_in_canvas_x + 1):
+                    blockrect = self._make_blockrect(col, row, superblock_size)
+                    if skipped_superblock != block_num:
+                        draw_superblock_bg(blockrect, block_num)
                     self.superblocks.append(blockrect.copy())
+                    block_num += 1
 
-                    num += 1
+        def draw_superblock_bg(blockrect, block_num):
+            superblock_size = len(self.letters) * self.field_size
+            # Background
+            canvas.paint.color = get_fg_setting("superblock_background_color") + hx(
+                self.bg_transparency
+            )
+            canvas.paint.style = Paint.Style.FILL
+            canvas.draw_rect(blockrect)
+
+            # Border
+            canvas.paint.color = get_fg_setting("superblock_stroke_color") + hx(
+                self.bg_transparency
+            )
+            canvas.paint.style = Paint.Style.STROKE
+            canvas.paint.stroke_width = 5
+            canvas.draw_rect(blockrect)
+
+            # drawing the big number in the background
+            canvas.paint.style = Paint.Style.FILL
+            canvas.paint.textsize = int(superblock_size)
+            text_rect = canvas.paint.measure_text(str(block_num))[1]
+            # text_rect.center = blockrect.center
+            text_rect.x = blockrect.x
+            text_rect.y = blockrect.y
+            canvas.paint.color = get_fg_setting("large_number_color") + hx(
+                self.bg_transparency
+            )
+            canvas.draw_text(str(block_num), text_rect.x, text_rect.y + text_rect.height)
 
         def draw_text():
             canvas.paint.text_align = canvas.paint.TextAlign.CENTER
             canvas.paint.textsize = 17
-            canvas.paint.typeface = settings.get("user.flex_mouse_grid_font")
-
-            skip_it = False
-
+            canvas.paint.typeface = get_fg_setting("font")
             for row in range(0, self.rows + 1):
                 for col in range(0, self.columns + 1):
-                    if self.pattern == "checkers":
-                        if (row % 2 == 0 and col % 2 == 0) or (
-                            row % 2 == 1 and col % 2 == 1
-                        ):
-                            skip_it = True
-                        else:
-                            skip_it = False
-
-                    if self.pattern == "frame" or self.pattern == "phonetic":
-                        if (row % 26 == 0) or (col % 26 == 0):
-                            skip_it = False
-                        else:
-                            skip_it = True
-
-                    # draw the highlighter
-
-                    base_rect = self.superblocks[self.selected_superblock].copy()
-
-                    if (
-                        row >= (base_rect.y / self.field_size)
-                        and row <= (base_rect.y / self.field_size + len(self.letters))
-                        and col >= (base_rect.x / self.field_size)
-                        and col <= (base_rect.x / self.field_size + len(self.letters))
-                    ):
-                        within_selected_superblock = True
-
-                        if (
-                            within_selected_superblock
-                            and len(self.input_so_far) == 1
-                            and self.input_so_far.startswith(
-                                self.letters[row % len(self.letters)]
-                            )
-                        ):
-                            skip_it = False
-
-                    if not (skip_it):
+                    if should_draw_letter(col, row):
                         draw_letters(row, col)
 
+        def should_draw_letter(col, row):
+            curr_row_letter = self.letters[row % len(self.letters)]
+            base_rect = self.superblocks[self.selected_superblock]
+            within_selected_superblock = (
+                row >= (base_rect.y / self.field_size)
+                and row <= (base_rect.y / self.field_size + len(self.letters))
+                and col >= (base_rect.x / self.field_size)
+                and col <= (base_rect.x / self.field_size + len(self.letters))
+            )
+            if (
+                within_selected_superblock
+                and len(self.input_so_far) == 1
+                and self.input_so_far.startswith(curr_row_letter)
+            ):
+                return True
+            skip_it = False
+            if self.pattern == "checkers":
+                even_row_col = row % 2 == 0 and col % 2 == 0
+                odd_row_col = row % 2 == 1 and col % 2 == 1
+                if even_row_col or odd_row_col:
+                    skip_it = True
+                else:
+                    skip_it = False
+
+            if self.pattern == "frame" or self.pattern == "phonetic":
+                LETTERS_IN_ALPHABET = 26
+                # Only draw cols at row alphabet ends, and vise versa
+                if (row % LETTERS_IN_ALPHABET == 0) or (col % LETTERS_IN_ALPHABET == 0):
+                    skip_it = False
+                else:
+                    skip_it = True
+            return not skip_it
+
         def draw_letters(row, col):
-            # get letters
+            curr_row_letter = self.letters[row % len(self.letters)]
+            curr_col_letter = self.letters[col % len(self.letters)]
             # gets a letter from the alphabet of the form 'ab' or 'DA'
-            text_string = f"{self.letters[row % len(self.letters)]}{self.letters[col % len(self.letters)]}"
+            text_string = f"{curr_row_letter}{curr_col_letter}"
+            # remove distracting letters from frame mode frames.
+            if self.pattern == "frame":
+                if curr_row_letter == "a":
+                    text_string = curr_col_letter
+                elif curr_col_letter == "a":
+                    text_string = curr_row_letter
+            elif self.pattern == "phonetic":
+                if curr_row_letter == "a":
+                    text_string = curr_col_letter
+                elif curr_col_letter == "a":
+                    # gets the phonetic words currently being used
+                    text_string = user_letter_words[row % len(self.letters)]
+            background_rect, text_rect = _make_centered_bg_rect(text_string, col, row)
+
+            # check if someone has said a letter and highlight a row
+            this_row_selected = self.input_so_far.startswith(curr_row_letter)
+
+
+            if not this_row_selected: # Draw regular grid letters
+                # BG
+                canvas.paint.color = get_fg_setting("letters_background_color") + self.label_transparency_hx
+                canvas.paint.style = Paint.Style.FILL
+                canvas.draw_rect(background_rect)
+
+                # Text
+                canvas.paint.color = get_fg_setting("small_letters_color") + self.label_transparency_hx
+                canvas.draw_text(
+                    text_string,
+                    col_field_center(col),
+                    row_field_text_center(row, text_rect, 0),
+                )
+
+            # sees if the background should be highlighted
+            else:
+                # Draw this letter highlighted as part of the current row highlight
+                canvas.paint.color = (
+                    get_fg_setting("row_highlighter") + self.label_transparency_hx
+                )
+                phonetic_word = user_letter_words[col % len(self.letters)]
+                col_label_letter = phonetic_word[0] if self.pattern == "phonetic" else curr_col_letter
+                _draw_colored_text_box(
+                    text_rect,
+                    col_label_letter,
+                    col,
+                    row,
+                )
+                if self.pattern == "phonetic":
+                    draw_selected_row_phonetic_letter(text_rect, phonetic_word, col, row)
+
+        def draw_selected_row_phonetic_letter(text_rect, phonetic_word, col, row):
+            # Leave row highlight for first letter, but draw the rest of the phonetic letters normal
+            canvas.paint.color = (
+                get_fg_setting("row_highlighter") + self.label_transparency_hx
+            )
+            # draw columns of phonetic words
+            for letter_index, letter_word in enumerate(list(phonetic_word)):
+                _draw_colored_text_box(
+                    text_rect,
+                    letter_word,
+                    col,
+                    row,
+                    letter_index,
+                )
+                canvas.paint.color = (
+                    get_fg_setting("letters_background_color")
+                    + self.label_transparency_hx
+                )
+
+        def col_field_center(col):
+            return col * self.field_size + self.field_size / 2
+
+        def row_field_text_center(row, text_rect, row_letter_index=0):
+            # Row letter index is used to offset the row position of the
+            # text if it is was a multi-char string, eg for phonetic column
+            # labels.
+            return row * self.field_size + (
+                self.field_size / 2 + text_rect.height / 2
+            ) * (row_letter_index + 1)
+
+        def _make_centered_bg_rect(text_string, col, row, row_letter_index=0):
             # this the measure text is the box around the text.
             canvas.paint.textsize = int(self.field_size * 3 / 5)
             # canvas.paint.textsize = int(field_size*4/5)
             text_rect = canvas.paint.measure_text(text_string)[1]
-
             background_rect = text_rect.copy()
             background_rect.center = Point2d(
-                col * self.field_size + self.field_size / 2,
-                row * self.field_size + self.field_size / 2,
-            )
+                col_field_center(col),
+                row_field_text_center(row, text_rect, row_letter_index),
+            )  # I think this re-centers the point?
             background_rect = background_rect.inset(-4)
+            return background_rect, text_rect
 
-            # remove distracting letters from frame mode frames.
-            if self.pattern == "frame":
-                if self.letters[row % len(self.letters)] == "a":
-                    # gets a letter from the alphabet of the form 'ab' or 'DA'
-                    text_string = f"{self.letters[col % len(self.letters)]}"
-                    # this the measure text is the box around the text.
-                    canvas.paint.textsize = int(self.field_size * 3 / 5)
-                    # canvas.paint.textsize = int(field_size*4/5)
-                    text_rect = canvas.paint.measure_text(text_string)[
-                        1
-                    ]  # find out how many characters long the text is?
-                    background_rect = text_rect.copy()
-                    background_rect.center = Point2d(
-                        col * self.field_size + self.field_size / 2,
-                        row * self.field_size + self.field_size / 2,
-                    )  # I think this re-centers the point?
-                    background_rect = background_rect.inset(-4)
-                elif self.letters[col % len(self.letters)] == "a":
-                    text_string = f"{self.letters[row % len(self.letters)]}"
-
-                    canvas.paint.textsize = int(self.field_size * 3 / 5)
-                    # canvas.paint.textsize = int(field_size*4/5)
-                    text_rect = canvas.paint.measure_text(text_string)[
-                        1
-                    ]  # find out how many characters long the text is?
-
-                    background_rect = text_rect.copy()
-                    background_rect.center = Point2d(
-                        col * self.field_size + self.field_size / 2,
-                        row * self.field_size + self.field_size / 2,
-                    )  # I think this re-centers the point?
-                    background_rect = background_rect.inset(-4)
-
-            elif self.pattern == "phonetic":
-                if self.letters[row % len(self.letters)] == "a":
-                    # gets a letter from the alphabet of the form 'ab' or 'DA'
-                    text_string = f"{self.letters[col % len(self.letters)]}"
-                    # this the measure text is the box around the text.
-                    canvas.paint.textsize = int(self.field_size * 3 / 5)
-                    # canvas.paint.textsize = int(field_size*4/5)
-                    text_rect = canvas.paint.measure_text(text_string)[
-                        1
-                    ]  # find out how many characters long the text is?
-                    background_rect = text_rect.copy()
-                    background_rect.center = Point2d(
-                        col * self.field_size + self.field_size / 2,
-                        row * self.field_size + self.field_size / 2,
-                    )  # I think this re-centers the point?
-                    background_rect = background_rect.inset(-4)
-                elif self.letters[col % len(self.letters)] == "a":
-                    # gets the phonetic words currently being used
-                    text_string = f"{list(registry.lists['user.letter'][0].keys())[row%len(self.letters)]}"
-
-                    canvas.paint.textsize = int(self.field_size * 3 / 5)
-                    # canvas.paint.textsize = int(field_size*4/5)
-                    text_rect = canvas.paint.measure_text(text_string)[
-                        1
-                    ]  # find out how many characters long the text is?
-
-                    background_rect = text_rect.copy()
-                    background_rect.center = Point2d(
-                        col * self.field_size + self.field_size / 2,
-                        row * self.field_size + self.field_size / 2,
-                    )  # I think this re-centers the point?
-                    background_rect = background_rect.inset(-4)
-
-            if not (
-                self.input_so_far.startswith(self.letters[row % len(self.letters)])
-                or len(self.input_so_far) > 1
-                and self.input_so_far.endswith(self.letters[col % len(self.letters)])
-            ):
-                canvas.paint.color = settings.get(
-                    "user.flex_mouse_grid_letters_background_color"
-                ) + hx(self.label_transparency)
-                canvas.paint.style = Paint.Style.FILL
-                canvas.draw_rect(background_rect)
-                canvas.paint.color = settings.get(
-                    "user.flex_mouse_grid_small_letters_color"
-                ) + hx(self.label_transparency)
-                # paint.style = Paint.Style.STROKE
-                canvas.draw_text(
-                    text_string,
-                    col * self.field_size + self.field_size / 2,
-                    row * self.field_size + self.field_size / 2 + text_rect.height / 2,
-                )
-
-            # sees if the background should be highlighted
-            elif (
-                self.input_so_far.startswith(self.letters[row % len(self.letters)])
-                or len(self.input_so_far) > 1
-                and self.input_so_far.endswith(self.letters[col % len(self.letters)])
-            ):
-                # draw columns of phonetic words
-                phonetic_word = list(registry.lists["user.letter"][0].keys())[
-                    col % len(self.letters)
-                ]
-                letter_list = list(phonetic_word)
-                for index, letter in enumerate(letter_list):
-                    if index == 0:
-                        canvas.paint.color = settings.get(
-                            "user.flex_mouse_grid_row_highlighter"
-                        ) + hx(self.label_transparency)
-                        # check if someone has said a letter and highlight a row, or check if two
-                        # letters have been said and highlight a column
-
-                        # colors it the ordinary background.
-                        text_string = f"{letter}"  # gets a letter from the alphabet of the form 'ab' or 'DA'
-                        # this the measure text is the box around the text.
-                        canvas.paint.textsize = int(self.field_size * 3 / 5)
-                        # canvas.paint.textsize = int(field_size*4/5)
-                        text_rect = canvas.paint.measure_text(text_string)[
-                            1
-                        ]  # find out how many characters long the text is?
-
-                        background_rect = text_rect.copy()
-                        background_rect.center = Point2d(
-                            col * self.field_size + self.field_size / 2,
-                            row * self.field_size
-                            + (self.field_size / 2 + text_rect.height / 2)
-                            * (index + 1),
-                        )  # I think this re-centers the point?
-                        background_rect = background_rect.inset(-4)
-                        canvas.draw_rect(background_rect)
-                        canvas.paint.color = settings.get(
-                            "user.flex_mouse_grid_small_letters_color"
-                        ) + hx(self.label_transparency)
-                        # paint.style = Paint.Style.STROKE
-                        canvas.draw_text(
-                            text_string,
-                            col * self.field_size + (self.field_size / 2),
-                            row * self.field_size
-                            + (self.field_size / 2 + text_rect.height / 2)
-                            * (index + 1),
-                        )
-
-                    elif self.pattern == "phonetic":
-                        canvas.paint.color = settings.get(
-                            "user.flex_mouse_grid_letters_background_color"
-                        ) + hx(self.label_transparency)
-                        # gets a letter from the alphabet of the form 'ab' or 'DA'
-                        text_string = f"{letter}"
-                        # this the measure text is the box around the text.
-                        canvas.paint.textsize = int(self.field_size * 3 / 5)
-                        # canvas.paint.textsize = int(field_size*4/5)
-                        text_rect = canvas.paint.measure_text(text_string)[
-                            1
-                        ]  # find out how many characters long the text is?
-
-                        background_rect = text_rect.copy()
-                        background_rect.center = Point2d(
-                            col * self.field_size + self.field_size / 2,
-                            row * self.field_size
-                            + (self.field_size / 2 + text_rect.height / 2)
-                            * (index + 1),
-                        )  # I think this re-centers the point?
-                        background_rect = background_rect.inset(-4)
-                        canvas.draw_rect(background_rect)
-                        canvas.paint.color = settings.get(
-                            "user.flex_mouse_grid_small_letters_color"
-                        ) + hx(self.label_transparency)
-                        # paint.style = Paint.Style.STROKE
-                        canvas.draw_text(
-                            text_string,
-                            col * self.field_size + (self.field_size / 2),
-                            row * self.field_size
-                            + (self.field_size / 2 + text_rect.height / 2)
-                            * (index + 1),
-                        )
+        def _draw_colored_text_box(
+            text_rect, letter, col, row, index=0
+        ):
+            text_string = f"{letter}"
+            background_rect, _ = _make_centered_bg_rect(
+                text_string, col, row, row_letter_index=index
+            )
+            canvas.draw_rect(background_rect)
+            canvas.paint.color = get_fg_setting("small_letters_color") + self.label_transparency_hx
+            # paint.style = Paint.Style.STROKE
+            canvas.draw_text(
+                text_string,
+                col_field_center(col),
+                row * self.field_size
+                + (self.field_size / 2 + text_rect.height / 2) * (index + 1),
+            )
 
         def draw_rulers():
             for x_pos, align in [
@@ -689,7 +603,7 @@ class FlexMouseGrid:
                     text_string = "_" + self.letters[col % len(self.letters)]
                     text_rect = canvas.paint.measure_text(text_string)[1]
                     background_rect = text_rect.copy()
-                    background_rect.x = col * self.field_size + self.field_size / 2
+                    background_rect.x = col_field_center(col)
                     background_rect.y = y_pos
                     canvas.draw_text(text_string, background_rect.x, background_rect.y)
 
@@ -706,9 +620,7 @@ class FlexMouseGrid:
                         point_label = label
                     text_rect = canvas.paint.measure_text(point_label)[1]
                     text_rect = text_rect.inset(-2)
-                    canvas.paint.color = settings.get(
-                        "user.flex_mouse_grid_small_letters_color"
-                    )
+                    canvas.paint.color = get_fg_setting("small_letters_color")
                     canvas.draw_text(
                         point_label, point.x + 3, point.y + text_rect.height * 3 // 4
                     )
@@ -717,9 +629,9 @@ class FlexMouseGrid:
                     background_rect = text_rect.copy()
                     background_rect.x = point.x
                     background_rect.y = point.y
-                    canvas.paint.color = settings.get(
-                        "user.flex_mouse_grid_letters_background_color"
-                    ) + hx(self.label_transparency)
+                    canvas.paint.color = get_fg_setting(
+                        "letters_background_color"
+                    ) + self.label_transparency_hx
                     canvas.paint.style = Paint.Style.FILL
                     canvas.draw_rect(background_rect)
 
@@ -741,9 +653,7 @@ class FlexMouseGrid:
                 canvas.paint.style = Paint.Style.FILL
                 canvas.draw_rect(background_rect)
 
-                canvas.paint.color = settings.get(
-                    "user.flex_mouse_grid_small_letters_color"
-                )
+                canvas.paint.color = get_fg_setting("small_letters_color")
                 canvas.draw_text(
                     point_label,
                     box.x + 1,
@@ -836,24 +746,7 @@ class FlexMouseGrid:
                 upper_rect.center.y + text_rect.height // 4,
             )
 
-        if self.grid_showing:
-            draw_superblock()
-            draw_text()
-
-            if self.rulers_showing:
-                draw_rulers()
-
-        if self.points_showing:
-            draw_point_labels()
-
-        if self.boxes_threshold_view_showing:
-            draw_threshold()
-
-        if self.boxes_showing:
-            draw_boxes()
-
-        if self.info_showing:
-            draw_info()
+        draw_()
 
     def load_grid_config_from_store(self):
         self.grid_config = self.grid_config_store.load()
@@ -1141,6 +1034,9 @@ class FlexMouseGrid:
         print(process.stdout)
         print(process.stderr)
 
+        if process.returncode != 0:
+            print("Error running find_boxes.py:", process.stderr)
+            return
         process_output = json.loads(process.stdout)
         boxes = process_output["boxes"]
         window_rect = ui.active_window().rect
@@ -1227,7 +1123,15 @@ class FlexMouseGrid:
 
 
 mg = FlexMouseGrid()
-app.register("ready", mg.setup)
+
+
+# Initialize and then immediately deactivate to close the canvas
+def init_and_deactivate():
+    mg.setup()
+    mg.deactivate()
+
+
+app.register("ready", init_and_deactivate)
 
 
 @mod.action_class
